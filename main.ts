@@ -5,8 +5,11 @@
 // never from a hand-written list. Farm plans are concrete steps with a cost and
 // a time on every line. No wall clock, no network.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { buildDossier } from './vendor/makefun-board.ts';
+import { auditSeal, validate } from './lib/validate.ts';
 import {
   fitModel,
   impliedValue,
@@ -21,6 +24,9 @@ import {
 export const EARLY_ROWS = 158;
 const FARM_STEP_MIN = 20;
 const FARM_STEP_MAX = 600;
+const TEXT_MAX_BYTES = 65_536;
+const SCREENSHOT_MAX_BYTES = 524_288;
+const here = fileURLToPath(new URL('.', import.meta.url));
 
 function arg(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
@@ -190,6 +196,42 @@ export function buildBoard(snapshot: ReturnType<typeof parseSnapshot>, model: Va
   });
 }
 
+/** Dashboard data: board rows, fitted model, validation figures and the audit seal. */
+export function radarData(snapshot: ReturnType<typeof parseSnapshot>, model: ValueModel, board: BoardRow[]) {
+  const traded = snapshot.protocols.filter((protocol) => protocol.mcap_usd !== null && protocol.mcap_usd > 0 && protocol.tvl_usd > 0);
+  const comparables = traded
+    .map((protocol) => ({ slug: protocol.slug, name: protocol.name, mcap_usd: protocol.mcap_usd!, tvl_usd: protocol.tvl_usd }))
+    .sort((left, right) => right.tvl_usd - left.tvl_usd)
+    .slice(0, 24);
+  return {
+    as_of: snapshot.as_of,
+    model_version: MODEL_VERSION,
+    watchlist_size: snapshot.watchlist.length,
+    rows: board,
+    comparables,
+    model: {
+      curve: model.curve,
+      global_odds: model.global_odds,
+      categories: [...model.categories.values()].map((value) => ({ category: value.category, premium: value.premium, n: value.n })),
+      cohorts: model.cohorts,
+    },
+    validation: validate(snapshot.as_of, snapshot.protocols),
+    audit: { seal: auditSeal(snapshot.as_of, board.length, snapshot.watchlist.length, model.curve.n) },
+  };
+}
+
+function copyDirectory(from: string, to: string): string[] {
+  mkdirSync(to, { recursive: true });
+  const names: string[] = [];
+  for (const name of readdirSync(from)) {
+    const source = join(from, name);
+    if (!statSync(source).isFile()) continue;
+    copyFileSync(source, join(to, name));
+    names.push(name);
+  }
+  return names;
+}
+
 export function boardIssue(board: BoardRow[], snapshot: ReturnType<typeof parseSnapshot>): string | null {
   if (board.length !== snapshot.watchlist.length + EARLY_ROWS) {
     return `board has ${board.length} rows, expected ${snapshot.watchlist.length + EARLY_ROWS}`;
@@ -232,4 +274,22 @@ if (issue !== null) {
 }
 mkdirSync(outputArg, { recursive: true });
 writeFileSync(join(outputArg, 'board.json'), `${JSON.stringify({ as_of: snapshot.as_of, model_version: MODEL_VERSION, rows: board }, null, 2)}\n`);
-process.stdout.write(`radar jujur: wrote ${join(outputArg, 'board.json')} with ${board.length} rows (${snapshot.watchlist.length} watchlist, ${EARLY_ROWS} early)\n`);
+writeFileSync(join(outputArg, 'data.js'), `window.RADAR=${JSON.stringify(radarData(snapshot, model, board))};\n`);
+const dashboardFiles = copyDirectory(join(here, 'dashboard'), join(outputArg, 'dashboard'));
+const shotFiles = copyDirectory(join(here, 'screenshots'), join(outputArg, 'screenshots'));
+if (shotFiles.length !== 3) {
+  process.stderr.write(`radar jujur: screenshots/ holds ${shotFiles.length} images, expected 3\n`);
+  process.exit(1);
+}
+for (const name of shotFiles) {
+  if (statSync(join(outputArg, 'screenshots', name)).size > SCREENSHOT_MAX_BYTES) {
+    process.stderr.write(`radar jujur: screenshot ${name} is over the byte cap\n`);
+    process.exit(1);
+  }
+}
+writeFileSync(join(outputArg, 'dossier.json'), buildDossier(outputArg, {
+  text_max_bytes: TEXT_MAX_BYTES,
+  screenshots: { max: 3, max_bytes: SCREENSHOT_MAX_BYTES },
+  dashboard: { max_files: 400, max_bytes: 4_194_304 },
+}));
+process.stdout.write(`radar jujur: wrote ${board.length} rows, ${dashboardFiles.length} dashboard files, ${shotFiles.length} screenshots and dossier.json to ${outputArg}\n`);
