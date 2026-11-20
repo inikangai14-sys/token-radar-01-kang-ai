@@ -11,6 +11,7 @@ export interface ValidationFigures {
 
 export interface ValidationReport {
   loo: ValidationFigures;
+  kfold: ValidationFigures & { folds: number };
   by_time: ValidationFigures & { train_n: number; test_n: number };
 }
 
@@ -70,6 +71,32 @@ function figures(rows: SnapshotProtocol[], fit: Fit, spreadRows: SnapshotProtoco
   return { median_abs_pct: median, within_interval: within / rows.length * 100, n: rows.length };
 }
 
+/** Five-fold out-of-sample check. Slug order makes the folds stable; each fold refits the curve. */
+export function crossValidate(protocols: SnapshotProtocol[], folds = 5): ValidationFigures & { folds: number } {
+  if (folds < 2) throw new Error('crossValidate needs at least two folds');
+  const traded = protocols
+    .filter((row) => row.mcap_usd !== null && row.mcap_usd > 0 && row.tvl_usd > 0)
+    .slice()
+    .sort((left, right) => (left.slug < right.slug ? -1 : left.slug > right.slug ? 1 : 0));
+  if (traded.length < folds * 2) throw new Error('not enough traded protocols for five folds');
+  const misses: number[] = [];
+  let within = 0;
+  for (let fold = 0; fold < folds; fold += 1) {
+    const test = traded.filter((_, index) => index % folds === fold);
+    const train = traded.filter((_, index) => index % folds !== fold);
+    const fit = fitLogCurve(train);
+    for (const row of test) {
+      const prediction = predict(row, fit, train);
+      misses.push(Math.abs(prediction.value - row.mcap_usd!) / row.mcap_usd! * 100);
+      if (row.mcap_usd! >= prediction.p25 && row.mcap_usd! <= prediction.p75) within += 1;
+    }
+  }
+  misses.sort((left, right) => left - right);
+  const middle = Math.floor((misses.length - 1) / 2);
+  const median = misses.length % 2 === 0 ? (misses[middle]! + misses[middle + 1]!) / 2 : misses[middle]!;
+  return { median_abs_pct: median, within_interval: within / misses.length * 100, n: misses.length, folds };
+}
+
 export function validate(snapshotAsOf: string, protocols: SnapshotProtocol[]): ValidationReport {
   const traded = protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   const full = fitLogCurve(traded);
@@ -80,7 +107,7 @@ export function validate(snapshotAsOf: string, protocols: SnapshotProtocol[]): V
   const newer = traded.filter((p) => p.listed_at === null || Date.parse(`${p.listed_at}T00:00:00Z`) >= cutoff);
   const olderFit = fitLogCurve(older);
   const byTime = figures(newer, olderFit, older);
-  return { loo, by_time: { ...byTime, train_n: older.length, test_n: newer.length } };
+  return { loo, kfold: crossValidate(protocols), by_time: { ...byTime, train_n: older.length, test_n: newer.length } };
 }
 
 export function auditSeal(asOf: string, rowCount: number, watchlist: number, curveN: number): string {

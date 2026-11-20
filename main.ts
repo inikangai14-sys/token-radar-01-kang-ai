@@ -22,6 +22,7 @@ import {
 } from './lib/model.ts';
 
 export const EARLY_ROWS = 158;
+const PLAN_USD = 3_100;
 const FARM_STEP_MIN = 20;
 const FARM_STEP_MAX = 600;
 const TEXT_MAX_BYTES = 65_536;
@@ -39,12 +40,8 @@ function firstChain(protocol: SnapshotProtocol): string {
   return protocol.chains.length > 0 ? protocol.chains[0]! : 'its main chain';
 }
 
-function capitalFor(protocol: SnapshotProtocol): number {
-  if (protocol.tvl_usd >= 5_000_000_000) return 500;
-  if (protocol.tvl_usd >= 1_000_000_000) return 250;
-  if (protocol.tvl_usd >= 100_000_000) return 150;
-  if (protocol.tvl_usd >= 10_000_000) return 100;
-  return 50;
+function usd(amount: number): string {
+  return '$' + amount.toLocaleString('en-US');
 }
 
 function holdDaysFor(age: number | null): number {
@@ -91,11 +88,16 @@ function actionFor(protocol: SnapshotProtocol, capital: number, chain: string): 
   return `Deposit $${capital} of USDC into ${name} on ${chain} and keep the position open through the review.`;
 }
 
+function feeBpsFor(protocol: SnapshotProtocol): number {
+  return protocol.tvl_usd >= 1_000_000_000 ? 40 : 100;
+}
+
+function feeFor(protocol: SnapshotProtocol, capital: number): number {
+  return Math.max(3, Math.round(capital * feeBpsFor(protocol) / 10_000));
+}
+
 function costFor(protocol: SnapshotProtocol, capital: number): string {
-  if (protocol.tvl_usd >= 1_000_000_000) {
-    return `$${capital} of capital plus about $${Math.max(3, Math.round(capital * 0.004))} in gas and protocol fees`;
-  }
-  return `$${capital} of capital plus about $${Math.max(2, Math.round(capital * 0.01))} in gas and protocol fees`;
+  return `$${capital} of capital plus about $${feeFor(protocol, capital)} in gas and protocol fees`;
 }
 
 function timeFor(protocol: SnapshotProtocol, age: number | null): string {
@@ -106,17 +108,21 @@ function timeFor(protocol: SnapshotProtocol, age: number | null): string {
 
 function farmSteps(protocol: SnapshotProtocol, age: number | null): string[] {
   const chain = firstChain(protocol);
-  const capital = capitalFor(protocol);
+  const capital = PLAN_USD;
   const action = actionFor(protocol, capital, chain);
-  const cost = costFor(protocol, capital);
-  const time = timeFor(protocol, age);
+  const fee = feeFor(protocol, capital);
   const verdict = protocol.tvl_usd >= 100_000_000 && (protocol.change_7d ?? 0) >= -10 ? 'FARM' : protocol.tvl_usd >= 10_000_000 ? 'MARGINAL' : 'SKIP';
+  const days = holdDaysFor(age);
+  const midway = Math.floor(days / 2);
   const steps = [
-    `Open a fresh wallet with no other positions and keep its seed phrase offline; budget $${capital} of USDC for ${protocol.name}.`,
-    action,
-    `Track the position for ${time}; expected cost is ${cost}.`,
-    `Record ${protocol.name}'s TVL on day 0, day ${Math.floor(holdDaysFor(age) / 2)} and day ${holdDaysFor(age)} and compare the change.`,
-    `Exit if TVL falls more than 25% or the protocol pauses deposits; verdict at this size is ${verdict}.`,
+    `SETUP - Open one fresh wallet for ${protocol.name} and store its seed phrase offline. COST: ${usd(capital)} of USDC. TIME: 10 minutes on day 0.`,
+    `FUND - Bridge or swap ${usd(capital)} of USDC into ${chain} and confirm the receipt in the new wallet. COST: about ${usd(fee)} in bridge gas. TIME: 15 minutes on day 0.`,
+    `ENTER - ${action} COST: ${usd(capital)} principal plus about ${usd(fee)} in protocol fees. TIME: 10 minutes on day 0.`,
+    `BASELINE - Screenshot the deposit receipt and ${protocol.name}'s TVL, then record both in a log. COST: $0. TIME: 5 minutes on day 0.`,
+    `CHECK 1 - Verify the position is still live and TVL has not fallen more than 25%. COST: $0. TIME: 5 minutes on day ${midway}.`,
+    `CHECK 2 - Compare TVL with the baseline and read any protocol pause or points notice. COST: $0 unless one rebalance is needed, then about ${usd(fee)}. TIME: 15 minutes on day ${days}.`,
+    `EXIT - Redeem the position and send principal plus any token claim back to your main wallet. COST: about ${usd(fee)} in exit gas. TIME: 15 minutes on day ${days}.`,
+    `RECONCILE - Log fees, hours spent and tokens received against the forecast. COST: $0. TIME: 10 minutes after day ${days}; verdict at this size is ${verdict}.`,
   ];
   return steps.map((step) => {
     let text = step.trim();
@@ -168,6 +174,7 @@ export function chooseProtocols(snapshot: ReturnType<typeof parseSnapshot>): Sna
 }
 
 export function buildBoard(snapshot: ReturnType<typeof parseSnapshot>, model: ValueModel = fitModel(snapshot)): BoardRow[] {
+  const watchlistSlugs = new Set(snapshot.watchlist);
   const scored = chooseProtocols(snapshot).map((protocol) => {
     const valuation: Valuation = impliedValue(protocol, model, snapshot.as_of);
     return { protocol, valuation };
@@ -179,6 +186,11 @@ export function buildBoard(snapshot: ReturnType<typeof parseSnapshot>, model: Va
   return scored.map(({ protocol, valuation }, index) => {
     const age = valuation.age_days;
     return {
+      chains: protocol.chains,
+      watchlist: watchlistSlugs.has(protocol.slug),
+      plan_usd: PLAN_USD,
+      hold_days: holdDaysFor(age),
+      fee_bps: feeBpsFor(protocol),
       slug: protocol.slug,
       name: protocol.name,
       rank: index + 1,
