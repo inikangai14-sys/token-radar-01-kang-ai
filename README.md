@@ -6,10 +6,11 @@
 
 Radar Jujur ranks pre-token protocols with a fitted value model: a size curve
 from protocols whose tokens already trade, a shrunk category premium, a 7-day
-momentum term, and launch odds from the age cohort. Every row carries its own
-P25–P75 range, launch odds, full arithmetic, nearest traded comparables, and a
-costed farm plan. The dashboard shows leave-one-out and by-time validation
-figures plainly, plus an audit seal.
+momentum term, and launch odds from category-and-age peers. Every row carries
+its own tight P25–P75 quartile range, launch odds, full arithmetic, nearest
+traded comparables, and a costed 8-step farm plan. The dashboard shows an
+out-of-fold KPI, a farm-economics panel with MULT and net-cost columns and
+verdict tabs, leave-one-out and by-time validation figures, plus an audit seal.
 
 Board: 198 rows — all 40 watchlist protocols (40/40) and 158 largest rankable
 pre-token protocols below the floor. Deterministic, snapshot-only, no network.
