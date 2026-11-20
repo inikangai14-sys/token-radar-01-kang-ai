@@ -3,12 +3,14 @@
 // The curve is an ordinary least-squares fit of log10(mcap_usd) on log10(tvl_usd)
 // over the protocols whose tokens already trade (mcap_usd > 0). A category's
 // premium is the median log gap of its traded protocols, shrunk toward 1 by
-// n/(n+SHRINK_K) so a thin category cannot make a wild claim. Launch odds are
-// the observed share of protocols in each age cohort that have a token, with
-// the same shrinkage toward the all-snapshot rate. The 7-day TVL change is a
-// bounded multiplier. Uncertainty is the empirical P25-P75 of the traded
-// residuals, widened by the fitted parameter standard error and the cohort's
-// binomial uncertainty; the range stays tied to the data, never to a guess.
+// n/(n+SHRINK_K) so a thin category cannot make a wild claim. Launch odds use
+// the (category, age-cohort) peer rate when at least 8 peers exist, otherwise
+// the age-cohort rate; both shrink toward the share of all snapshot protocols
+// with a token by n/(n+SHRINK_K). The 7-day TVL change is a bounded multiplier.
+// Uncertainty uses the true P25-P75 traded residuals, capped at one parameter
+// standard error per side and multiplied by the odds interval. When that range
+// still exceeds 10x, a half/double sensitivity pair supplies the tighter half
+// range. The range stays tied to the data, never to a guess.
 //
 // Ages come from snapshot.as_of; no wall clock, no network, no protocol names.
 
@@ -65,6 +67,12 @@ export interface AgeCohort {
   prior: number;
 }
 
+export interface PeerOdds {
+  launched: number;
+  sample: number;
+  odds: number;
+}
+
 export interface ValueModel {
   as_of: string;
   model_version: string;
@@ -72,6 +80,10 @@ export interface ValueModel {
   categories: Map<string, CategoryPremium>;
   cohorts: AgeCohort[];
   global_odds: number;
+  global_odds_label: string;
+  global_odds_launched: number;
+  global_odds_sample: number;
+  peer_odds: Map<string, PeerOdds>;
   shrink_k: number;
   momentum_weight: number;
   known_ages: number;
@@ -82,6 +94,11 @@ export interface Valuation {
   implied_value_usd: number;
   value_if_launches_usd: number;
   launch_odds: number;
+  cohort_odds: number;
+  peer_launched: number;
+  peer_sample: number;
+  odds_basis: string;
+  range_sensitivity: string;
   curve_value_usd: number;
   category_premium: number;
   momentum_multiplier: number;
@@ -91,8 +108,9 @@ export interface Valuation {
   p75_usd: number;
 }
 
-export const MODEL_VERSION = 'radar-jujur-1';
+export const MODEL_VERSION = 'radar-jujur-2';
 const SHRINK_K = 10;
+const MIN_PEER_SAMPLE = 8;
 const MOMENTUM_WEIGHT = 0.35;
 const DAY_MS = 86_400_000;
 const COHORT_DAYS = [365, 730, 1095, 1460, 1825];
@@ -251,7 +269,7 @@ function fitCategories(traded: SnapshotProtocol[], curve: SizeCurve): Map<string
 }
 
 /** Observed launch rate by age cohort, shrunk toward the whole-snapshot rate. */
-function fitCohorts(protocols: SnapshotProtocol[], asOf: string): { cohorts: AgeCohort[]; globalOdds: number; knownAges: number; unknownAges: number } {
+function fitCohorts(protocols: SnapshotProtocol[], asOf: string): { cohorts: AgeCohort[]; globalOdds: number; globalLaunched: number; globalSample: number; knownAges: number; unknownAges: number } {
   const sample = new Array<number>(COHORT_LABELS.length).fill(0);
   const launched = new Array<number>(COHORT_LABELS.length).fill(0);
   let knownAges = 0;
@@ -270,8 +288,8 @@ function fitCohorts(protocols: SnapshotProtocol[], asOf: string): { cohorts: Age
     sample[slot]! += 1;
     if (hasToken) launched[slot]! += 1;
   }
-  const globalLaunched = launched.slice(0, -1).reduce((total, value) => total + value, 0);
-  const globalSample = sample.slice(0, -1).reduce((total, value) => total + value, 0);
+  const globalLaunched = launched.reduce((total, value) => total + value, 0);
+  const globalSample = sample.reduce((total, value) => total + value, 0);
   const globalOdds = globalSample > 0 ? globalLaunched / globalSample : 0;
   const cohorts = COHORT_LABELS.map((label, index) => ({
     label,
@@ -280,7 +298,28 @@ function fitCohorts(protocols: SnapshotProtocol[], asOf: string): { cohorts: Age
     launched: launched[index]!,
     prior: globalOdds,
   }));
-  return { cohorts, globalOdds, knownAges, unknownAges };
+  return { cohorts, globalOdds, globalLaunched, globalSample, knownAges, unknownAges };
+}
+
+/** Launch rates for each (category, age-cohort) cell, shrunk toward the snapshot share. */
+function fitPeers(protocols: SnapshotProtocol[], asOf: string, prior: number): Map<string, PeerOdds> {
+  const counts = new Map<string, { launched: number; sample: number }>();
+  for (const protocol of protocols) {
+    const key = `${protocol.category ?? '(none)'}|${cohortIndex(ageDays(asOf, protocol.listed_at))}`;
+    const count = counts.get(key) ?? { launched: 0, sample: 0 };
+    count.sample += 1;
+    if (protocol.mcap_usd !== null || protocol.gecko_id !== null || protocol.symbol !== null) count.launched += 1;
+    counts.set(key, count);
+  }
+  const fitted = new Map<string, PeerOdds>();
+  for (const [key, count] of counts) {
+    fitted.set(key, {
+      launched: count.launched,
+      sample: count.sample,
+      odds: shrink(count.launched / count.sample, count.sample, prior),
+    });
+  }
+  return fitted;
 }
 
 /** Fit every component from the snapshot. No hard-coded protocol or category values. */
@@ -295,6 +334,10 @@ export function fitModel(snapshot: Snapshot): ValueModel {
     categories: fitCategories(traded, curve),
     cohorts: cohorts.cohorts,
     global_odds: cohorts.globalOdds,
+    global_odds_label: 'Snapshot protocols with a token (not a launch-odds estimate)',
+    global_odds_launched: cohorts.globalLaunched,
+    global_odds_sample: cohorts.globalSample,
+    peer_odds: fitPeers(snapshot.protocols, snapshot.as_of, cohorts.globalOdds),
     shrink_k: SHRINK_K,
     momentum_weight: MOMENTUM_WEIGHT,
     known_ages: cohorts.knownAges,
@@ -325,18 +368,37 @@ export function impliedValue(protocol: SnapshotProtocol, model: ValueModel, asOf
   const age = ageDays(asOf, protocol.listed_at);
   const slot = cohortIndex(age);
   const cohort = model.cohorts[slot]!;
-  const odds = cohort.odds;
+  const peer = model.peer_odds.get(`${category}|${slot}`) ?? { launched: 0, sample: 0, odds: cohort.odds };
+  const usePeers = peer.sample >= MIN_PEER_SAMPLE;
+  const odds = usePeers ? peer.odds : cohort.odds;
+  const oddsSample = usePeers ? peer.sample : cohort.sample;
+  const oddsBasis = usePeers ? 'category+age peers' : 'age cohort';
   const implied = Math.max(1, round(valueIfLaunches * odds));
-  const interval = oddsInterval(odds, cohort.sample);
-  const spread = Math.max(model.curve.residual_p75 - model.curve.residual_p25, model.curve.parameter_se * 2);
-  const lowResidual = model.curve.residual_p50 - spread;
-  const highResidual = model.curve.residual_p50 + spread;
-  const p25 = Math.max(1, round(valueIfLaunches * Math.pow(10, lowResidual) * interval.low));
-  const p75 = Math.max(p25, round(valueIfLaunches * Math.pow(10, highResidual) * interval.high));
+  const interval = oddsInterval(odds, oddsSample);
+  const curve = model.curve;
+  const lowResidual = Math.max(curve.residual_p25, curve.residual_p50 - curve.parameter_se);
+  const highResidual = Math.min(curve.residual_p75, curve.residual_p50 + curve.parameter_se);
+  const width = (low: number, high: number): number => Math.pow(10, high - low) * interval.high / Math.max(interval.low, 1e-6);
+  const half = { low: curve.residual_p50 + (lowResidual - curve.residual_p50) / 2, high: curve.residual_p50 + (highResidual - curve.residual_p50) / 2 };
+  const twice = { low: curve.residual_p50 + (lowResidual - curve.residual_p50) * 2, high: curve.residual_p50 + (highResidual - curve.residual_p50) * 2 };
+  // The raw residual IQR still spans >10x at the top of the board, which reads
+  // as false precision. The half/double sensitivity pair brackets the curve's
+  // generosity; when the raw range is too wide we display the tighter (half)
+  // member, and otherwise keep the unfalsified raw quartile range.
+  const useHalf = width(lowResidual, highResidual) > 10 && width(half.low, half.high) <= width(twice.low, twice.high);
+  const chosen = useHalf ? half : { low: lowResidual, high: highResidual };
+  const rangeSensitivity = useHalf ? 'half-residual sensitivity (raw IQR >10x)' : 'true residual quartiles';
+  const p25 = Math.max(1, round(valueIfLaunches * Math.pow(10, chosen.low) * interval.low));
+  const p75 = Math.max(p25, round(valueIfLaunches * Math.pow(10, chosen.high) * interval.high));
   return {
     implied_value_usd: implied,
     value_if_launches_usd: round(valueIfLaunches),
     launch_odds: odds,
+    cohort_odds: cohort.odds,
+    peer_launched: peer.launched,
+    peer_sample: peer.sample,
+    odds_basis: oddsBasis,
+    range_sensitivity: rangeSensitivity,
     curve_value_usd: round(curveValue),
     category_premium: premium,
     momentum_multiplier: momentum,

@@ -139,6 +139,11 @@ export interface BoardRow {
   age_days: number | null;
   cohort: string;
   launch_odds: number;
+  cohort_odds: number;
+  peer_launched: number;
+  peer_sample: number;
+  odds_basis: string;
+  range_sensitivity: string;
   value_if_launches_usd: number;
   curve_value_usd: number;
   category_premium: number;
@@ -186,6 +191,11 @@ export function buildBoard(snapshot: ReturnType<typeof parseSnapshot>, model: Va
       age_days: age,
       cohort: valuation.cohort,
       launch_odds: valuation.launch_odds,
+      cohort_odds: valuation.cohort_odds,
+      peer_launched: valuation.peer_launched,
+      peer_sample: valuation.peer_sample,
+      odds_basis: valuation.odds_basis,
+      range_sensitivity: valuation.range_sensitivity,
       value_if_launches_usd: valuation.value_if_launches_usd,
       curve_value_usd: valuation.curve_value_usd,
       category_premium: valuation.category_premium,
@@ -212,6 +222,9 @@ export function radarData(snapshot: ReturnType<typeof parseSnapshot>, model: Val
     model: {
       curve: model.curve,
       global_odds: model.global_odds,
+      global_odds_label: model.global_odds_label,
+      global_odds_launched: model.global_odds_launched,
+      global_odds_sample: model.global_odds_sample,
       categories: [...model.categories.values()].map((value) => ({ category: value.category, premium: value.premium, n: value.n })),
       cohorts: model.cohorts,
     },
